@@ -24,7 +24,7 @@ const matchSchema = new mongoose.Schema({
   },
   matchType: {
     type: String,
-    enum: ['exact', 'reference', 'amount', 'embedding', 'manual'],
+    enum: ['exact', 'reference', 'amount', 'embedding', 'bank_name', 'description', 'reference_description', 'amount_description', 'manual'],
     required: true
   },
   matchedAt: {
@@ -47,6 +47,10 @@ const matchSchema = new mongoose.Schema({
       default: false
     },
     dateMatch: {
+      type: Boolean,
+      default: false
+    },
+    bankNameMatch: {
       type: Boolean,
       default: false
     },
