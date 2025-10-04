@@ -1,0 +1,67 @@
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    environment:
+      - REACT_APP_API_URL=http://localhost:4000/api
+
+  backend:
+    build: ./backend
+    ports:
+      - "4000:4000"
+    environment:
+      - NODE_ENV=development
+      - MONGO_URI=mongodb://mongo:27017/bank_reconciliation
+      - ML_SERVICE_URL=http://ml:5000
+      - MINIO_ENDPOINT=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=admin
+      - MINIO_SECRET_KEY=password
+      - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+    depends_on:
+      - mongo
+      - ml
+      - minio
+    volumes:
+      - ./data:/app/data
+      - ./backend/src:/app/src
+      - ./backend/package.json:/app/package.json
+      - ./backend/nodemon.json:/app/nodemon.json
+      - /app/node_modules
+
+  ml:
+    build: ./ml-service
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./ml-service/models:/app/models
+    environment:
+      - MODEL_CACHE_DIR=/app/models
+
+  mongo:
+    image: mongo:7-jammy
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=bank_reconciliation
+    volumes:
+      - mongo_data:/data/db
+
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+
+volumes:
+  mongo_data:
+  minio_data:
