@@ -59,6 +59,7 @@ router.post('/upload', authenticateToken, upload.single('file'), async (req, res
     await file.save();
 
     // Process file asynchronously
+    console.log(`🚀 Starting async processing for file ${file._id} (${fileType})`);
     processFileAsync(file._id, buffer, fileType, userId);
 
     res.status(201).json({
@@ -143,51 +144,86 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 // Async file processing function
 async function processFileAsync(fileId, buffer, fileType, userId) {
   try {
-    const file = await File.findById(fileId);
-    if (!file) return;
+    console.log(`🔄 Processing file ${fileId} (${fileType}) for user ${userId}`);
 
+    const file = await File.findById(fileId);
+    if (!file) {
+      console.log(`❌ File ${fileId} not found`);
+      return;
+    }
+
+    console.log(`📝 Updating file status to processing...`);
     file.processingStatus = 'processing';
     await file.save();
 
     let parsedData;
+    console.log(`📊 Parsing ${fileType} file: ${file.filename}`);
 
     // Parse file based on type
     if (file.mimeType.includes('spreadsheet') || file.filename.match(/\.(xlsx|xls)$/i)) {
+      console.log(`📊 File is Excel format, parsing...`);
       const sheets = await fileService.parseExcelFile(buffer);
       parsedData = sheets[0]?.data || []; // Use first sheet
+      console.log(`📊 Parsed ${sheets.length} sheets, first sheet has ${parsedData.length} rows`);
     } else if (file.filename.match(/\.csv$/i)) {
+      console.log(`📊 File is CSV format, parsing...`);
       parsedData = await fileService.parseCsvFile(buffer);
+      console.log(`📊 Parsed ${parsedData.length} CSV rows`);
     } else {
+      console.log(`❌ Unsupported file format`);
       parsedData = [];
     }
 
+    if (parsedData.length === 0) {
+      console.log(`⚠️ No data parsed from file`);
+      file.processingStatus = 'failed';
+      file.processingError = 'No data found in file';
+      await file.save();
+      return;
+    }
+
     // Process transactions
+    console.log(`⚙️ Processing ${fileType} transactions...`);
     let transactions = [];
     if (fileType === 'fuerza_movil') {
+      console.log(`⚙️ Processing Fuerza Movil data with ${parsedData.length} rows`);
       transactions = await transactionService.processFuerzaMovilData(parsedData, userId, fileId);
     } else if (fileType === 'bank') {
+      console.log(`⚙️ Processing Bank data with ${parsedData.length} rows`);
       transactions = await transactionService.processBankData(parsedData, userId, fileId);
+    } else {
+      console.log(`❌ Unknown file type: ${fileType}`);
+      transactions = [];
     }
+
+    console.log(`💾 Generated ${transactions.length} transactions`);
 
     // Save transactions
     if (transactions.length > 0) {
+      console.log(`💾 Saving transactions to database...`);
       await transactionService.saveTransactions(transactions);
+      console.log(`✅ Transactions saved successfully`);
+    } else {
+      console.log(`⚠️ No transactions to save`);
     }
 
     // Update file status
+    console.log(`✅ Updating file status to completed`);
     file.processingStatus = 'completed';
     file.transactionCount = transactions.length;
     await file.save();
 
-    console.log(`Processed file ${fileId}: ${transactions.length} transactions`);
+    console.log(`🎉 Successfully processed file ${fileId}: ${transactions.length} transactions`);
   } catch (error) {
-    console.error(`Error processing file ${fileId}:`, error);
+    console.error(`❌ Error processing file ${fileId}:`, error);
+    console.error(`❌ Error stack:`, error.stack);
 
     const file = await File.findById(fileId);
     if (file) {
       file.processingStatus = 'failed';
       file.processingError = error.message;
       await file.save();
+      console.log(`💥 Updated file ${fileId} status to failed`);
     }
   }
 }

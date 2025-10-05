@@ -39,7 +39,7 @@ const matchSchema = new mongoose.Schema({
   // Matching criteria details
   criteria: {
     referenceMatch: {
-      type: Boolean,
+      type: String, // Can be false or specific match type like "embedded_payment_ref"
       default: false
     },
     amountMatch: {

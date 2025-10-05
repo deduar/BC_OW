@@ -125,9 +125,16 @@ class TransactionService {
     let totalComparisons = 0;
     let referenceMatches = 0;
 
-    console.log(`Starting match process: ${fuerzaTransactions.length} Fuerza Movil transactions vs ${bankTransactions.length} bank transactions`);
-    console.log(`Fuerza transactions IDs: ${fuerzaTransactions.map(t => t._id)}`);
-    console.log(`Bank transactions IDs: ${bankTransactions.map(t => t._id)}`);
+    console.log(`🔍 Starting match process for user ${userId}`);
+    console.log(`📊 Processing: ${fuerzaTransactions.length} Fuerza Movil transactions vs ${bankTransactions.length} bank transactions`);
+
+    if (fuerzaTransactions.length === 0 || bankTransactions.length === 0) {
+      console.warn('⚠️ No transactions to match');
+      return [];
+    }
+
+    console.log(`📋 Fuerza transactions IDs: ${fuerzaTransactions.map(t => t._id).slice(0, 5)}${fuerzaTransactions.length > 5 ? '...' : ''}`);
+    console.log(`🏦 Bank transactions IDs: ${bankTransactions.map(t => t._id).slice(0, 5)}${bankTransactions.length > 5 ? '...' : ''}`);
 
     for (const fuerzaTx of fuerzaTransactions) {
       for (const bankTx of bankTransactions) {
@@ -153,22 +160,39 @@ class TransactionService {
       }
     }
 
-    console.log(`Match process completed: ${totalComparisons} comparisons, ${referenceMatches} reference matches, ${matches.length} total matches above threshold`);
+    console.log(`📊 Match process completed: ${totalComparisons} comparisons, ${referenceMatches} reference matches, ${matches.length} total matches above threshold`);
+
+    if (matches.length === 0) {
+      console.log('⚠️ No matches found above threshold');
+      return [];
+    }
 
     // Remove duplicate matches (bank transactions can only be used once)
+    console.log('🔄 Removing duplicate matches...');
     const uniqueMatches = this.removeDuplicateMatches(matches);
 
-    console.log(`After deduplication: ${uniqueMatches.length} unique matches`);
+    console.log(`✅ After deduplication: ${uniqueMatches.length} unique matches`);
 
     if (uniqueMatches.length > 0) {
-      await Match.insertMany(uniqueMatches);
-      console.log(`Saved ${uniqueMatches.length} matches to database`);
+      console.log('💾 Saving matches to database...');
+      try {
+        await Match.insertMany(uniqueMatches);
+        console.log(`✅ Successfully saved ${uniqueMatches.length} matches to database`);
+      } catch (dbError) {
+        console.error('❌ Error saving matches to database:', dbError);
+        throw new Error(`Failed to save matches: ${dbError.message}`);
+      }
     }
 
     return uniqueMatches;
   }
 
   async calculateMatch(fuerzaTx, bankTx) {
+    console.log(`\n=== Starting match calculation ===`);
+    console.log(`Fuerza Tx ID: ${fuerzaTx._id}, Ref: "${fuerzaTx.reference}", Amount: ${fuerzaTx.amount}, Date: ${fuerzaTx.date}`);
+    console.log(`Bank Tx ID: ${bankTx._id}, Ref: "${bankTx.reference}", Amount: ${bankTx.amount}, Date: ${bankTx.date}`);
+    console.log(`Fuerza paymentDate: ${fuerzaTx.paymentDate}, totalAmount: ${fuerzaTx.totalAmount}, paidAmount: ${fuerzaTx.paidAmount}`);
+
     let confidence = 0;
     const criteria = {
       referenceMatch: false,
@@ -179,24 +203,39 @@ class TransactionService {
     };
 
     // Reference matching with regex patterns for Fuerza Movil
-    // Check multiple reference fields for better matching
+    // PRIORITIZE EMBEDDED REFERENCES - This is the most important criterion
+    console.log(`\n--- Reference Matching (PRIORITY CRITERION) ---`);
+    console.log(`Fuerza paymentReference: "${fuerzaTx.paymentReference}"`);
+    console.log(`Fuerza main reference: "${fuerzaTx.reference}"`);
+    console.log(`Bank reference: "${bankTx.reference}"`);
+
     let referenceMatch = null;
-    
-    // First, try paymentReference (most specific)
+
+    // First, try paymentReference (most specific) - HIGHEST PRIORITY
     if (fuerzaTx.paymentReference && bankTx.reference) {
+      console.log(`🔍 Trying paymentReference: "${fuerzaTx.paymentReference}" vs "${bankTx.reference}"`);
       referenceMatch = this.matchReferences(fuerzaTx.paymentReference, bankTx.reference);
+      console.log(`PaymentReference match result:`, referenceMatch);
       if (referenceMatch.matched) {
-        confidence += referenceMatch.confidence;
+        // SIGNIFICANTLY INCREASE confidence for embedded references
+        const enhancedConfidence = referenceMatch.confidence * 2.5; // Boost by 2.5x
+        confidence += enhancedConfidence;
         criteria.referenceMatch = referenceMatch.type;
+        console.log(`✅ PaymentReference EMBEDDED MATCH! Confidence: +${enhancedConfidence.toFixed(3)} (boosted)`);
       }
     }
     
-    // If no match with paymentReference, try main reference
+    // If no match with paymentReference, try main reference - SECOND PRIORITY
     if ((!referenceMatch || !referenceMatch.matched) && fuerzaTx.reference && bankTx.reference) {
+      console.log(`🔍 Trying main reference: "${fuerzaTx.reference}" vs "${bankTx.reference}"`);
       referenceMatch = this.matchReferences(fuerzaTx.reference, bankTx.reference);
+      console.log(`Main reference match result:`, referenceMatch);
       if (referenceMatch.matched) {
-        confidence += referenceMatch.confidence;
+        // Boost confidence for main reference matches too
+        const enhancedConfidence = referenceMatch.confidence * 2.0; // Boost by 2x
+        confidence += enhancedConfidence;
         criteria.referenceMatch = referenceMatch.type;
+        console.log(`✅ Main Reference EMBEDDED MATCH! Confidence: +${enhancedConfidence.toFixed(3)} (boosted)`);
       }
     }
     
@@ -224,40 +263,64 @@ class TransactionService {
       }
     }
 
-    // Amount matching (with tolerance) - use paidAmount if available
-    const fuerzaAmount = fuerzaTx.paidAmount || fuerzaTx.amount;
-    const amountDiff = Math.abs(fuerzaAmount - bankTx.amount);
-    const amountTolerance = Math.max(fuerzaAmount * 0.05, 1); // 5% or $1 minimum (more lenient)
+    // Amount matching (with tolerance) - REDUCED WEIGHT since reference is priority
+    // Only used as secondary validation, not primary criterion
+    console.log(`\n--- Amount Matching (SECONDARY CRITERION) ---`);
+    console.log(`Bank amount: ${bankTx.amount}`);
 
-    if (amountDiff <= amountTolerance) {
-      confidence += 0.4; // Increased weight for exact amount matches
-      criteria.amountMatch = true;
-    } else if (amountDiff <= amountTolerance * 2) {
-      confidence += 0.2; // Partial credit for close amounts
-    } else if (amountDiff <= amountTolerance * 5) {
-      confidence += 0.05; // Very small credit for somewhat close amounts
+    const fuerzaAmounts = [
+      fuerzaTx.paidAmount || fuerzaTx.amount, // Current logic
+      fuerzaTx.totalAmount, // Total amount from invoice
+      fuerzaTx.amount // Fallback to main amount
+    ].filter(amount => amount && amount > 0);
+
+    console.log(`Fuerza amounts to try: [${fuerzaAmounts.join(', ')}]`);
+
+    let bestAmountMatch = { diff: Infinity, confidence: 0, matched: false };
+    let amountDiff = 0; // Initialize amountDiff variable
+
+    for (const fuerzaAmount of fuerzaAmounts) {
+      amountDiff = Math.abs(fuerzaAmount - bankTx.amount);
+      const amountTolerance = Math.max(fuerzaAmount * 0.05, 1); // 5% or $1 minimum
+
+      if (amountDiff <= amountTolerance) {
+        bestAmountMatch = { diff: amountDiff, confidence: 0.1, matched: true }; // Reduced weight
+        break; // Exact match found, use it
+      } else if (amountDiff <= amountTolerance * 2 && amountDiff < bestAmountMatch.diff) {
+        bestAmountMatch = { diff: amountDiff, confidence: 0.05, matched: true }; // Reduced weight
+      } else if (amountDiff <= amountTolerance * 5 && amountDiff < bestAmountMatch.diff) {
+        bestAmountMatch = { diff: amountDiff, confidence: 0.02, matched: true }; // Reduced weight
+      }
     }
 
-    // Date matching (within 3 days) - reduced weight since dates are not critical
-    const dateDiff = Math.abs(fuerzaTx.date - bankTx.date) / (1000 * 60 * 60 * 24);
+    if (bestAmountMatch.matched) {
+      confidence += bestAmountMatch.confidence;
+      criteria.amountMatch = true;
+    }
+
+    // Date matching (within 3 days) - MINIMAL WEIGHT since reference is priority
+    // Only used as very secondary validation
+    console.log(`\n--- Date Matching (TERTIARY CRITERION) ---`);
+    const fuerzaDate = fuerzaTx.paymentDate || fuerzaTx.date || fuerzaTx.dueDate;
+    const dateDiff = Math.abs(fuerzaDate - bankTx.date) / (1000 * 60 * 60 * 24);
     if (dateDiff <= 3) {
-      confidence += 0.1; // Reduced from 0.2
+      confidence += 0.02; // Minimal weight
       criteria.dateMatch = true;
     } else if (dateDiff <= 7) {
-      confidence += 0.05; // Reduced from 0.1
+      confidence += 0.01; // Minimal weight
     }
 
-    // Embedding similarity (description matching)
+    // Embedding similarity (description matching) - MINIMAL WEIGHT
     if (fuerzaTx.embedding && bankTx.embedding && fuerzaTx.embedding.length > 0 && bankTx.embedding.length > 0) {
       try {
         const similarity = await this.calculateEmbeddingSimilarity(fuerzaTx.embedding, bankTx.embedding);
         criteria.embeddingSimilarity = similarity;
         if (similarity > 0.85) {
-          confidence += 0.4; // High similarity gets significant weight
+          confidence += 0.05; // Very minimal weight
         } else if (similarity > 0.7) {
-          confidence += 0.25; // Good similarity gets good weight
+          confidence += 0.03; // Very minimal weight
         } else if (similarity > 0.5) {
-          confidence += 0.1; // Moderate similarity gets small weight
+          confidence += 0.01; // Very minimal weight
         }
       } catch (error) {
         console.error('Error calculating embedding similarity:', error);
@@ -282,11 +345,23 @@ class TransactionService {
       matchType = 'bank_name';
     }
 
+    // Calculate final amount difference using the best matching amounts
+    const finalFuerzaAmount = fuerzaAmounts.length > 0 ? fuerzaAmounts[0] : (fuerzaTx.paidAmount || fuerzaTx.amount);
+    const amountDifference = bestAmountMatch.matched ? bestAmountMatch.diff / finalFuerzaAmount : (amountDiff || 0) / finalFuerzaAmount;
+
+    console.log(`\n=== Match Result ===`);
+    console.log(`Final confidence: ${confidence.toFixed(3)}`);
+    console.log(`Match type: ${matchType}`);
+    console.log(`Criteria met:`, criteria);
+    console.log(`Amount difference: ${(amountDifference * 100).toFixed(1)}%`);
+    console.log(`Date difference: ${dateDiff.toFixed(1)} days`);
+    console.log(`Will match: ${confidence > 0.1 ? 'YES' : 'NO'}`);
+
     return {
       confidence: Math.min(confidence, 1),
       matchType,
       criteria,
-      amountDifference: amountDiff / fuerzaAmount,
+      amountDifference,
       dateDifference: dateDiff
     };
   }
@@ -304,6 +379,16 @@ class TransactionService {
     }
   }
 
+  // Helper function to check for consecutive digits
+  hasConsecutiveDigits(fuerzaNumbers, bankNumbers, minLength = 5) {
+    if (fuerzaNumbers.length < minLength || bankNumbers.length < minLength) {
+      return false;
+    }
+
+    // Check if fuerzaNumbers appears as consecutive digits in bankNumbers
+    return bankNumbers.includes(fuerzaNumbers);
+  }
+
   matchReferences(fuerzaReference, bankReference) {
     // Clean references for comparison
     const cleanFuerzaRef = fuerzaReference.toString().trim().toUpperCase();
@@ -311,26 +396,51 @@ class TransactionService {
 
     // Exact match
     if (cleanFuerzaRef === cleanBankRef) {
-      return { matched: true, confidence: 0.4, type: 'exact' };
+      return { matched: true, confidence: 0.95, type: 'exact' }; // Very high confidence
     }
 
     // Extract numeric parts from both references
     const fuerzaNumbers = cleanFuerzaRef.replace(/[^\d]/g, '');
     const bankNumbers = cleanBankRef.replace(/[^\d]/g, '');
 
-    // Check for embedded payment reference patterns
-    // Example: Bank ref "51477192884" contains payment ref "92884"
-    if (fuerzaNumbers.length >= 4 && bankNumbers.length >= 8) {
+    console.log(`🔢 Comparing numbers: Fuerza "${fuerzaNumbers}" vs Bank "${bankNumbers}"`);
+
+    // STRICT EMBEDDED REFERENCE VALIDATION
+    // CRITICAL REQUIREMENT: At least 5 consecutive digits must match
+    if (fuerzaNumbers.length >= 5 && bankNumbers.length >= 8) {
       // Check if bank reference ends with Fuerza reference (most reliable)
       if (bankNumbers.endsWith(fuerzaNumbers)) {
-        return { matched: true, confidence: 0.4, type: 'embedded_payment_ref' };
+        console.log(`✅ STRICT EMBEDDED MATCH (ENDS WITH): ${fuerzaNumbers} at end of ${bankNumbers}`);
+        return { matched: true, confidence: 0.95, type: 'embedded_payment_ref' }; // Maximum confidence
       }
-      
-      // Check if bank reference contains Fuerza reference anywhere (more flexible)
-      if (bankNumbers.includes(fuerzaNumbers)) {
-        // Higher confidence if the fuerza reference is longer or represents a significant portion
-        const confidence = fuerzaNumbers.length >= 5 ? 0.3 : 0.25;
+
+      // Check if bank reference contains Fuerza reference with STRICT validation
+      if (bankNumbers.includes(fuerzaNumbers) && this.hasConsecutiveDigits(fuerzaNumbers, bankNumbers, 5)) {
+        console.log(`✅ STRICT EMBEDDED MATCH (CONTAINS): ${fuerzaNumbers} found in ${bankNumbers}`);
+
+        // MUCH HIGHER confidence for embedded matches
+        let confidence = 0.85; // Base very high confidence for embedded matches
+
+        if (fuerzaNumbers.length >= 7) confidence = 0.9;
+        else if (fuerzaNumbers.length >= 6) confidence = 0.88;
+        else if (fuerzaNumbers.length >= 5) confidence = 0.85;
+
         return { matched: true, confidence, type: 'embedded_numeric_match' };
+      }
+
+      // Check for Fuerza reference within bank reference with position-based confidence
+      const fuerzaInBank = bankNumbers.indexOf(fuerzaNumbers);
+      if (fuerzaInBank !== -1 && this.hasConsecutiveDigits(fuerzaNumbers, bankNumbers, 5)) {
+        console.log(`✅ STRICT POSITION MATCH: ${fuerzaNumbers} at position ${fuerzaInBank} in ${bankNumbers}`);
+        // Higher confidence if Fuerza reference is at the end (more likely to be payment ref)
+        const positionRatio = fuerzaInBank / (bankNumbers.length - fuerzaNumbers.length);
+        if (positionRatio > 0.7) { // Near the end
+          return { matched: true, confidence: 0.9, type: 'embedded_payment_ref_position' };
+        } else if (positionRatio > 0.5) { // In the latter half
+          return { matched: true, confidence: 0.85, type: 'embedded_payment_ref_late' };
+        } else { // Earlier in the reference
+          return { matched: true, confidence: 0.8, type: 'embedded_payment_ref_early' };
+        }
       }
     }
     
@@ -374,7 +484,15 @@ class TransactionService {
       // Pattern 7: Bank reference with transfer code (e.g., TRF.MB 0134)
       /TRF\.\w+\s+\d+/,
       // Pattern 8: Bank reference with account number pattern
-      /\d{10,15}/ // Long numeric sequences that might contain payment refs
+      /\d{10,15}/, // Long numeric sequences that might contain payment refs
+      // Pattern 9: Open World specific patterns (from the user's example)
+      /OPEN\s+WORLD\s+CONSUL\s*\d*/,
+      // Pattern 10: J followed by numbers (from J302386900 pattern)
+      /J\d+/,
+      // Pattern 11: Generic alphanumeric patterns that might contain payment refs
+      /[A-Z]+\d+/,
+      // Pattern 12: Numbers with specific separators
+      /\d{4,}[A-Z]\d{4,}/
     ];
 
     // Check if Fuerza reference matches any pattern
@@ -389,12 +507,23 @@ class TransactionService {
       // Check bank patterns
       for (const pattern of bankPatterns) {
         const match = cleanBankRef.match(pattern);
-        if (match && match[1]) {
-          const extractedNumbers = match[1];
-          if (extractedNumbers === fuerzaNumbers || 
+        if (match) {
+          // Extract numbers from the pattern match
+          const extractedNumbers = match[1] || match[0].replace(/[^\d]/g, '');
+
+          if (extractedNumbers === fuerzaNumbers ||
               (fuerzaNumbers.includes(extractedNumbers) && extractedNumbers.length >= 4) ||
               (extractedNumbers.includes(fuerzaNumbers) && fuerzaNumbers.length >= 4)) {
-            return { matched: true, confidence: 0.3, type: 'pattern_match' };
+            // Higher confidence for longer matches or significant portions
+            const matchLength = Math.min(extractedNumbers.length, fuerzaNumbers.length);
+            const confidence = matchLength >= 6 ? 0.35 : matchLength >= 5 ? 0.3 : 0.25;
+            return { matched: true, confidence, type: 'pattern_match' };
+          }
+
+          // Also check if the pattern contains the fuerza numbers anywhere
+          if (extractedNumbers.includes(fuerzaNumbers) && fuerzaNumbers.length >= 4) {
+            const confidence = fuerzaNumbers.length >= 6 ? 0.3 : 0.25;
+            return { matched: true, confidence, type: 'pattern_contains_fuerza' };
           }
         }
       }
@@ -509,9 +638,15 @@ class TransactionService {
   }
 
   isValidMatch(match, fuerzaTx, bankTx) {
-    // Special case: if we have a reference match, be very lenient with other criteria
+    // CRITICAL: If we have a REFERENCE EMBEDDED match, accept it regardless of other criteria
+    if (match.criteria.referenceMatch && match.criteria.referenceMatch.includes('embedded')) {
+      console.log(`🎯 ACCEPTING MATCH: Has STRICT embedded reference match (${match.criteria.referenceMatch})`);
+      return true;
+    }
+
+    // For non-embedded reference matches, be more strict
     if (match.criteria.referenceMatch) {
-      console.log(`Accepting match: has reference match, being very lenient`);
+      console.log(`Accepting match: has reference match, being lenient`);
       return true;
     }
 
@@ -521,27 +656,14 @@ class TransactionService {
       return false;
     }
 
-    // Dates are not critical - don't reject based on date differences
-    // if (match.dateDifference > 1000) {
-    //   console.log(`Rejecting match: date difference too high (${match.dateDifference.toFixed(1)} days)`);
-    //   return false;
-    // }
-
-    // Require at least one strong criterion for low-confidence matches (lowered threshold)
-    if (match.confidence < 0.25) {
-      const hasStrongCriterion = 
-        match.criteria.referenceMatch || 
-        match.criteria.amountMatch || 
-        match.criteria.embeddingSimilarity > 0.5; // Lowered from 0.6
-      
-      if (!hasStrongCriterion) {
-        console.log(`Rejecting match: low confidence (${match.confidence.toFixed(3)}) without strong criterion`);
-        return false;
-      }
+    // For matches without embedded references, require higher confidence
+    if (match.confidence < 0.7) { // Increased threshold for non-reference matches
+      console.log(`Rejecting match: insufficient confidence (${match.confidence.toFixed(3)}) without embedded reference`);
+      return false;
     }
 
-    // Reject matches where only bank name matches (more lenient)
-    if (match.matchType === 'bank_name' && match.confidence < 0.25) {
+    // Reject matches where only bank name matches (more strict)
+    if (match.matchType === 'bank_name' && match.confidence < 0.5) {
       console.log(`Rejecting match: bank name only match with low confidence`);
       return false;
     }
@@ -550,8 +672,8 @@ class TransactionService {
     const fuerzaAmount = fuerzaTx.paidAmount || fuerzaTx.amount;
     const bankAmount = bankTx.amount;
     const amountRatio = Math.max(fuerzaAmount, bankAmount) / Math.min(fuerzaAmount, bankAmount);
-    
-    if (amountRatio > 100) { // One amount is more than 100x the other (was 50x)
+
+    if (amountRatio > 50) { // One amount is more than 50x the other (reduced tolerance)
       console.log(`Rejecting match: amount ratio too extreme (${amountRatio.toFixed(1)}x)`);
       return false;
     }
