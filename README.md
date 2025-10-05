@@ -9,7 +9,7 @@ La aplicación está construida como microservicios en contenedores Docker:
 - **Frontend**: React + Nginx (puerto 3000)
 - **Backend**: Node.js + Express (puerto 4000)
 - **ML Service**: Python + FastAPI (puerto 5000)
-- **Database**: MongoDB (puerto 27017)
+- **Database**: MongoDB (puerto 27018)
 - **File Storage**: MinIO (puerto 9000/9001)
 
 ## Requisitos
