@@ -10,9 +10,12 @@ const router = express.Router();
 // Run matching for user's data
 router.post('/run', authenticateToken, async (req, res) => {
   try {
+    console.log('🔄 Starting matching process for user:', req.user._id);
+
     const userId = req.user._id;
 
     // Get all user's transactions
+    console.log('📊 Fetching user transactions...');
     const fuerzaTransactions = await Transaction.find({
       userId,
       type: 'fuerza_movil'
@@ -23,21 +26,29 @@ router.post('/run', authenticateToken, async (req, res) => {
       type: 'bank'
     }).lean();
 
+    console.log(`📈 Found ${fuerzaTransactions.length} Fuerza Movil transactions and ${bankTransactions.length} bank transactions`);
+
     if (fuerzaTransactions.length === 0 || bankTransactions.length === 0) {
+      console.warn('⚠️ No transactions available for matching');
       return res.status(400).json({
         error: 'Need both Fuerza Movil and bank transactions to run matching'
       });
     }
 
     // Delete existing matches
-    await Match.deleteMany({ userId });
+    console.log('🗑️ Deleting existing matches...');
+    const deletedMatches = await Match.deleteMany({ userId });
+    console.log(`🗑️ Deleted ${deletedMatches.deletedCount} existing matches`);
 
     // Run matching
+    console.log('🚀 Running matching algorithm...');
     const matches = await transactionService.findMatches(
       userId,
       fuerzaTransactions,
       bankTransactions
     );
+
+    console.log(`✅ Matching completed! Found ${matches.length} matches`);
 
     res.json({
       message: 'Matching completed',
@@ -45,8 +56,12 @@ router.post('/run', authenticateToken, async (req, res) => {
       matches: matches.slice(0, 50) // Return first 50 matches
     });
   } catch (error) {
-    console.error('Run matching error:', error);
-    res.status(500).json({ error: 'Matching failed' });
+    console.error('❌ Run matching error:', error);
+    console.error('❌ Error stack:', error.stack);
+    res.status(500).json({
+      error: 'Matching failed',
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 });
 

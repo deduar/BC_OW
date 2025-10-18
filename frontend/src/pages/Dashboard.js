@@ -64,6 +64,56 @@ function Dashboard() {
     }
   };
 
+  const runMatching = async () => {
+    try {
+      console.log('🔄 Starting matching process...');
+      setLoading(true);
+
+      // Check if user has transactions before running matching
+      console.log('📊 Current stats:', stats.transactions);
+
+      if (stats.transactions.fuerza_movil === 0 || stats.transactions.bank === 0) {
+        console.warn('⚠️ No transactions available for matching');
+        alert('No hay transacciones disponibles para hacer matching. Sube archivos primero.');
+        return;
+      }
+
+      console.log('🚀 Calling optimized matching API...');
+      // Usar el algoritmo optimizado
+      const response = await authService.api.post('/optimized-matches/run-optimized');
+      console.log('✅ Optimized matching API response:', response.data);
+
+      console.log('🔄 Reloading stats...');
+      await loadStats(); // Reload stats after matching
+      console.log('✅ Stats reloaded');
+
+      // Show success message
+      alert(`Matching optimizado completado! Se encontraron ${response.data.matchesFound} matches.`);
+
+    } catch (error) {
+      console.error('❌ Error running matching:', error);
+      console.error('❌ Error details:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message
+      });
+
+      // Show user-friendly error message
+      if (error.response?.status === 400) {
+        alert(`Error: ${error.response.data.error}`);
+      } else if (error.response?.status === 401) {
+        alert('Error de autenticación. Por favor inicia sesión nuevamente.');
+      } else if (error.response?.status === 500) {
+        alert('Error interno del servidor. Por favor intenta nuevamente.');
+      } else {
+        alert('Error ejecutando el matching. Por favor intenta nuevamente.');
+      }
+    } finally {
+      setLoading(false);
+      console.log('🏁 Matching process finished');
+    }
+  };
+
   const compareAlgorithms = async () => {
     try {
       setLoading(true);
@@ -158,15 +208,15 @@ function Dashboard() {
               <Button
                 variant="contained"
                 onClick={runMatching}
-                disabled={stats.transactions.fuerza_movil === 0 || stats.transactions.bank === 0}
+                disabled={stats.transactions.fuerza_movil === 0 || stats.transactions.bank === 0 || loading}
                 color="primary"
               >
-                Run Optimized Matching
+                {loading ? 'Running...' : 'Run Optimized Matching'}
               </Button>
               <Button
                 variant="outlined"
                 onClick={compareAlgorithms}
-                disabled={stats.transactions.fuerza_movil === 0 || stats.transactions.bank === 0}
+                disabled={stats.transactions.fuerza_movil === 0 || stats.transactions.bank === 0 || loading}
                 color="secondary"
               >
                 Compare Algorithms
