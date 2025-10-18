@@ -15,7 +15,6 @@ services:
     environment:
       - NODE_ENV=development
       - MONGO_URI=mongodb://mongo:27017/bank_reconciliation
-      - ML_SERVICE_URL=http://ml:5000
       - MINIO_ENDPOINT=minio
       - MINIO_PORT=9000
       - MINIO_ACCESS_KEY=admin
@@ -23,7 +22,6 @@ services:
       - JWT_SECRET=your-super-secret-jwt-key-change-in-production
     depends_on:
       - mongo
-      - ml
       - minio
     volumes:
       - ./data:/app/data
@@ -31,15 +29,6 @@ services:
       - ./backend/package.json:/app/package.json
       - ./backend/nodemon.json:/app/nodemon.json
       - /app/node_modules
-
-  ml:
-    build: ./ml-service
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./ml-service/models:/app/models
-    environment:
-      - MODEL_CACHE_DIR=/app/models
 
   mongo:
     image: mongo:7-jammy

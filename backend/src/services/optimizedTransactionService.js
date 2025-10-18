@@ -1,17 +1,16 @@
 const Transaction = require('../models/Transaction');
 const Match = require('../models/Match');
-const axios = require('axios');
 
 class OptimizedTransactionService {
   constructor() {
-    this.mlServiceUrl = process.env.ML_SERVICE_URL || 'http://ml:5000';
+    // Sin dependencias de ML
   }
 
   /**
-   * Algoritmo optimizado de matching en 3 fases
+   * Algoritmo optimizado de matching en 3 fases (SIN MACHINE LEARNING)
    * Fase 1: Matching por referencia (prioridad alta)
    * Fase 2: Matching por monto + fecha (solo si no hay referencia)
-   * Fase 3: Embeddings (solo casos especiales)
+   * Fase 3: Matching por descripción simple (solo casos especiales)
    */
   async findMatchesOptimized(userId, fuerzaTransactions, bankTransactions) {
     console.log(`Starting optimized matching for ${fuerzaTransactions.length} FuerzaMovil and ${bankTransactions.length} bank transactions`);
@@ -45,20 +44,19 @@ class OptimizedTransactionService {
     matches.push(...amountDateMatches);
     console.log(`Phase 2 completed: ${amountDateMatches.length} matches found`);
 
-    // FASE 3: Embeddings (solo casos especiales y baja confianza)
-    console.log('Phase 3: Embedding-based matching (limited)');
+    // FASE 3: Descripción simple (sin ML)
+    console.log('Phase 3: Description-based matching (simple text)');
     const finalFuerza = fuerzaTransactions.filter(tx => !usedFuerzaTxIds.has(tx._id.toString()));
     const finalBank = bankTransactions.filter(tx => !usedBankTxIds.has(tx._id.toString()));
     
-    // Solo procesar un subconjunto pequeño para embeddings
-    const embeddingMatches = await this.findEmbeddingMatches(
-      finalFuerza.slice(0, 50), // Limitar a 50 transacciones
-      finalBank.slice(0, 100),  // Limitar a 100 transacciones
+    const descriptionMatches = await this.findDescriptionMatches(
+      finalFuerza,
+      finalBank,
       usedBankTxIds, 
       usedFuerzaTxIds
     );
-    matches.push(...embeddingMatches);
-    console.log(`Phase 3 completed: ${embeddingMatches.length} matches found`);
+    matches.push(...descriptionMatches);
+    console.log(`Phase 3 completed: ${descriptionMatches.length} matches found`);
 
     // Preparar matches para guardar
     const matchesToSave = matches.map(match => ({
@@ -166,65 +164,47 @@ class OptimizedTransactionService {
   }
 
   /**
-   * FASE 3: Matching por embeddings (limitado)
-   * Solo para casos especiales y con límites de procesamiento
+   * FASE 3: Matching por descripción (sin ML)
+   * Solo para casos especiales usando comparación de texto simple
    */
-  async findEmbeddingMatches(fuerzaTransactions, bankTransactions, usedBankTxIds, usedFuerzaTxIds) {
+  async findDescriptionMatches(fuerzaTransactions, bankTransactions, usedBankTxIds, usedFuerzaTxIds) {
     const matches = [];
 
-    // Solo procesar transacciones que no tienen referencia válida
+    // Solo procesar transacciones que no tienen referencia válida y tienen monto
     const fuerzaWithoutRef = fuerzaTransactions.filter(tx => 
-      !tx.reference || tx.reference.length < 3
+      (!tx.reference || tx.reference.length < 3) && tx.amount > 0
     );
 
     if (fuerzaWithoutRef.length === 0) return matches;
 
-    // Generar embeddings solo para estas transacciones
-    const descriptions = fuerzaWithoutRef.map(tx => tx.description);
-    const embeddings = await this.generateEmbeddings(descriptions);
-
-    // Agregar embeddings a las transacciones
-    fuerzaWithoutRef.forEach((tx, index) => {
-      tx.embedding = embeddings[index] || [];
-    });
-
-    // Buscar matches por similitud semántica
+    // Buscar matches por descripción simple (sin ML)
     for (const fuerzaTx of fuerzaWithoutRef) {
-      if (!fuerzaTx.embedding || fuerzaTx.embedding.length === 0) continue;
+      if (usedFuerzaTxIds.has(fuerzaTx._id.toString())) continue;
 
-      let bestMatch = null;
-      let bestSimilarity = 0;
-
+      // Buscar candidatos por palabras clave en la descripción
+      const fuerzaKeywords = this.extractKeywords(fuerzaTx.description);
+      
       for (const bankTx of bankTransactions) {
         if (usedBankTxIds.has(bankTx._id.toString())) continue;
 
-        // Generar embedding para transacción bancaria si no existe
-        if (!bankTx.embedding || bankTx.embedding.length === 0) {
-          const bankEmbeddings = await this.generateEmbeddings([bankTx.description]);
-          bankTx.embedding = bankEmbeddings[0] || [];
+        const bankKeywords = this.extractKeywords(bankTx.description);
+        const keywordMatch = this.calculateKeywordSimilarity(fuerzaKeywords, bankKeywords);
+        
+        if (keywordMatch > 0.5) {
+          const match = this.calculateDescriptionMatch(fuerzaTx, bankTx, keywordMatch);
+          
+          if (match.confidence >= 0.6) {
+            matches.push({
+              fuerzaTransactionId: fuerzaTx._id,
+              bankTransactionId: bankTx._id,
+              ...match
+            });
+            
+            usedBankTxIds.add(bankTx._id.toString());
+            usedFuerzaTxIds.add(fuerzaTx._id.toString());
+            break; // Solo tomar el primer match
+          }
         }
-
-        if (bankTx.embedding.length === 0) continue;
-
-        const similarity = await this.calculateEmbeddingSimilarity(fuerzaTx.embedding, bankTx.embedding);
-        
-        if (similarity > bestSimilarity && similarity > 0.7) {
-          bestSimilarity = similarity;
-          bestMatch = bankTx;
-        }
-      }
-
-      if (bestMatch && bestSimilarity > 0.7) {
-        const match = this.calculateEmbeddingMatch(fuerzaTx, bestMatch, bestSimilarity);
-        
-        matches.push({
-          fuerzaTransactionId: fuerzaTx._id,
-          bankTransactionId: bestMatch._id,
-          ...match
-        });
-        
-        usedBankTxIds.add(bestMatch._id.toString());
-        usedFuerzaTxIds.add(fuerzaTx._id.toString());
       }
     }
 
@@ -350,34 +330,74 @@ class OptimizedTransactionService {
   }
 
   /**
-   * Generar embeddings para textos
+   * Extraer palabras clave de una descripción
    */
-  async generateEmbeddings(texts) {
-    try {
-      const response = await axios.post(`${this.mlServiceUrl}/embeddings`, {
-        texts
-      });
-      return response.data.embeddings;
-    } catch (error) {
-      console.error('Error generating embeddings:', error);
-      return texts.map(() => []);
-    }
+  extractKeywords(description) {
+    if (!description) return [];
+    
+    // Limpiar y normalizar texto
+    const cleanText = description.toLowerCase()
+      .replace(/[^\w\s]/g, ' ') // Remover caracteres especiales
+      .replace(/\s+/g, ' ')     // Normalizar espacios
+      .trim();
+    
+    // Palabras comunes a ignorar
+    const stopWords = ['el', 'la', 'de', 'del', 'en', 'con', 'por', 'para', 'a', 'al', 'y', 'o', 'un', 'una'];
+    
+    // Extraer palabras significativas
+    const words = cleanText.split(' ')
+      .filter(word => word.length > 2 && !stopWords.includes(word))
+      .slice(0, 5); // Solo las primeras 5 palabras más importantes
+    
+    return words;
   }
 
   /**
-   * Calcular similitud entre embeddings
+   * Calcular similitud entre palabras clave
    */
-  async calculateEmbeddingSimilarity(embedding1, embedding2) {
-    try {
-      const response = await axios.post(`${this.mlServiceUrl}/similarity`, {
-        embedding1,
-        embedding2
-      });
-      return response.data.similarity;
-    } catch (error) {
-      console.error('Error calculating similarity:', error);
-      return 0;
+  calculateKeywordSimilarity(keywords1, keywords2) {
+    if (keywords1.length === 0 || keywords2.length === 0) return 0;
+    
+    const set1 = new Set(keywords1);
+    const set2 = new Set(keywords2);
+    
+    // Calcular intersección
+    const intersection = new Set([...set1].filter(x => set2.has(x)));
+    const union = new Set([...set1, ...set2]);
+    
+    // Jaccard similarity
+    return intersection.size / union.size;
+  }
+
+  /**
+   * Calcular match basado en descripción
+   */
+  calculateDescriptionMatch(fuerzaTx, bankTx, keywordSimilarity) {
+    let confidence = keywordSimilarity * 0.6; // Base por similitud de palabras
+    const criteria = {
+      referenceMatch: false,
+      amountMatch: false,
+      dateMatch: false,
+      embeddingSimilarity: keywordSimilarity
+    };
+
+    // Bonus por monto similar
+    const bankAmountAbs = Math.abs(bankTx.amount);
+    const amountDiff = Math.abs(fuerzaTx.amount - bankAmountAbs);
+    const amountTolerance = Math.max(fuerzaTx.amount * 0.1, 5);
+    
+    if (amountDiff <= amountTolerance) {
+      confidence += 0.3;
+      criteria.amountMatch = true;
     }
+
+    return {
+      confidence: Math.min(confidence, 1),
+      matchType: 'description',
+      criteria,
+      amountDifference: amountDiff / (fuerzaTx.amount || 1),
+      dateDifference: Math.abs(fuerzaTx.date - bankTx.date) / (1000 * 60 * 60 * 24)
+    };
   }
 
   /**
