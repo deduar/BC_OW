@@ -64,13 +64,15 @@ function Dashboard() {
     }
   };
 
-  const runMatching = async () => {
+  const compareAlgorithms = async () => {
     try {
       setLoading(true);
-      await authService.api.post('/matches/run');
-      await loadStats(); // Reload stats after matching
+      const response = await authService.api.post('/optimized-matches/compare-algorithms');
+      console.log('Algorithm comparison:', response.data);
+      alert(`Comparison Results:\nOriginal: ${response.data.comparison.original.matchesFound} matches in ${response.data.comparison.original.executionTime}ms\nOptimized: ${response.data.comparison.optimized.matchesFound} matches in ${response.data.comparison.optimized.executionTime}ms\nTime reduction: ${response.data.comparison.improvement.timeReduction}`);
+      await loadStats();
     } catch (error) {
-      console.error('Error running matching:', error);
+      console.error('Error comparing algorithms:', error);
     } finally {
       setLoading(false);
     }
@@ -154,11 +156,20 @@ function Dashboard() {
                 Upload Files
               </Button>
               <Button
-                variant="outlined"
+                variant="contained"
                 onClick={runMatching}
                 disabled={stats.transactions.fuerza_movil === 0 || stats.transactions.bank === 0}
+                color="primary"
               >
-                Run Matching
+                Run Optimized Matching
+              </Button>
+              <Button
+                variant="outlined"
+                onClick={compareAlgorithms}
+                disabled={stats.transactions.fuerza_movil === 0 || stats.transactions.bank === 0}
+                color="secondary"
+              >
+                Compare Algorithms
               </Button>
               <Button
                 variant="outlined"
@@ -195,6 +206,32 @@ function Dashboard() {
                 />
               </Box>
             )}
+          </Paper>
+        </Grid>
+
+        {/* Algorithm Information */}
+        <Grid item xs={12}>
+          <Paper sx={{ p: 2, backgroundColor: '#f5f5f5' }}>
+            <Typography variant="h6" gutterBottom color="primary">
+              🚀 Optimized Matching Algorithm
+            </Typography>
+            <Typography variant="body2" color="textSecondary" sx={{ mb: 2 }}>
+              The system now uses an optimized 3-phase matching algorithm:
+            </Typography>
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <Typography variant="body2">
+                <strong>Phase 1:</strong> Reference matching (highest priority)
+              </Typography>
+              <Typography variant="body2">
+                <strong>Phase 2:</strong> Amount matching (for transactions without valid references)
+              </Typography>
+              <Typography variant="body2">
+                <strong>Phase 3:</strong> AI embeddings (limited to special cases only)
+              </Typography>
+            </Box>
+            <Typography variant="body2" color="textSecondary" sx={{ mt: 2, fontStyle: 'italic' }}>
+              This approach significantly reduces processing time while maintaining high accuracy.
+            </Typography>
           </Paper>
         </Grid>
       </Grid>

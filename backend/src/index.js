@@ -9,6 +9,7 @@ const authRoutes = require('./routes/auth');
 const fileRoutes = require('./routes/files');
 const transactionRoutes = require('./routes/transactions');
 const matchRoutes = require('./routes/matches');
+const optimizedMatchRoutes = require('./routes/optimizedMatches');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -48,6 +49,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/files', fileRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/matches', matchRoutes);
+app.use('/api/optimized-matches', optimizedMatchRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
