@@ -80,24 +80,61 @@ class OptimizedTransactionService {
    */
   async findReferenceMatches(fuerzaTransactions, bankTransactions, usedBankTxIds, usedFuerzaTxIds) {
     const matches = [];
+    let debugChecked = 0;
+    let debugSkipped = 0;
+    let debugNoRef = 0;
 
     for (const fuerzaTx of fuerzaTransactions) {
-      if (!fuerzaTx.reference || fuerzaTx.reference.length < 3) continue;
+      // Try main reference and paymentReference
+      const fmMainRef = (fuerzaTx.reference && fuerzaTx.reference.replace(/[^\d]/g, '')) || '';
+      const fmPaymentRef = (fuerzaTx.paymentReference && fuerzaTx.paymentReference.toString().replace(/[^\d]/g, '')) || '';
+      
+      // Need at least one valid reference (4+ digits)
+      if ((!fmMainRef || fmMainRef.length < 4) && (!fmPaymentRef || fmPaymentRef.length < 4)) {
+        debugNoRef++;
+        continue;
+      }
 
       // Buscar transacciones bancarias que contengan la referencia de FuerzaMovil
-      const candidateBankTxs = bankTransactions.filter(bankTx => 
-        bankTx.reference && 
-        bankTx.reference.includes(fuerzaTx.reference) &&
-        !usedBankTxIds.has(bankTx._id.toString())
-      );
+      // Check multiple matching strategies with both main ref and payment ref
+      const candidateBankTxs = bankTransactions.filter(bankTx => {
+        if (!bankTx.reference || usedBankTxIds.has(bankTx._id.toString())) {
+          return false;
+        }
+        
+        const bankRef = bankTx.reference.replace(/[^\d]/g, '');
+        
+        // Try matching with main reference
+        if (fmMainRef.length >= 4 && this.referencesMatch(fmMainRef, bankRef)) {
+          return true;
+        }
+        
+        // Try matching with payment reference (this is often the actual bank payment ref!)
+        if (fmPaymentRef.length >= 4 && this.referencesMatch(fmPaymentRef, bankRef)) {
+          return true;
+        }
+        
+        return false;
+      });
 
-      if (candidateBankTxs.length === 0) continue;
+      debugChecked++;
+      if (candidateBankTxs.length === 0) {
+        debugSkipped++;
+        // Log first few failures for debugging
+        if (debugSkipped <= 5) {
+          console.log(`🔍 No candidates for FM ref: "${fuerzaTx.reference}" (amount: ${fuerzaTx.amount || fuerzaTx.paidAmount})`);
+        }
+        continue;
+      }
 
       // Para cada candidato, calcular score de matching
       for (const bankTx of candidateBankTxs) {
         const match = this.calculateReferenceMatch(fuerzaTx, bankTx);
         
-        if (match.confidence >= 0.6) { // Umbral alto para referencias
+        // Lower threshold for reference matches - was 0.6, now 0.5
+        if (match.confidence >= 0.5) {
+          const refUsed = match.criteria.referenceMatch === 'payment_ref' ? fmPaymentRef : fmMainRef;
+          console.log(`✅ Match found: FM main:"${fmMainRef}" payment:"${fmPaymentRef}" <-> Bank "${bankTx.reference}" (conf: ${match.confidence.toFixed(2)}, used: ${match.criteria.referenceMatch})`);
           matches.push({
             fuerzaTransactionId: fuerzaTx._id,
             bankTransactionId: bankTx._id,
@@ -107,10 +144,15 @@ class OptimizedTransactionService {
           usedBankTxIds.add(bankTx._id.toString());
           usedFuerzaTxIds.add(fuerzaTx._id.toString());
           break; // Solo tomar el primer match por referencia
+        } else {
+          if (matches.length < 3) {
+            console.log(`⚠️ Low confidence match rejected: FM "${fuerzaTx.reference}" <-> Bank "${bankTx.reference}" (conf: ${match.confidence.toFixed(2)})`);
+          }
         }
       }
     }
 
+    console.log(`📊 Reference matching stats: ${debugChecked} checked, ${debugSkipped} no candidates, ${debugNoRef} no valid reference`);
     return matches;
   }
 
@@ -122,17 +164,22 @@ class OptimizedTransactionService {
     const matches = [];
 
     for (const fuerzaTx of fuerzaTransactions) {
-      if (fuerzaTx.amount <= 0) continue; // Saltar transacciones sin monto
+      // Use paidAmount if available (actual payment amount)
+      const fuerzaAmount = fuerzaTx.paidAmount || fuerzaTx.amount;
+      if (fuerzaAmount <= 0) continue; // Saltar transacciones sin monto
 
-      // Buscar candidatos por monto (tolerancia pequeña pero realista)
+      // Buscar candidatos por monto (tolerancia más realista)
       // Los montos deben ser muy similares en magnitud pero de signo contrario
-      const amountTolerance = Math.max(fuerzaTx.amount * 0.05, 5); // 5% o $5 mínimo
+      const amountTolerance = Math.max(fuerzaAmount * 0.10, 10); // 10% o $10 mínimo (more lenient)
       const candidateBankTxs = bankTransactions.filter(bankTx => {
+        if (usedBankTxIds.has(bankTx._id.toString())) return false;
+        
         // Comparar valor absoluto del monto bancario con monto FuerzaMovil
-        const bankAmountAbs = Math.abs(bankTx.amount);
-        const amountDiff = Math.abs(fuerzaTx.amount - bankAmountAbs);
-        return amountDiff <= amountTolerance && 
-               !usedBankTxIds.has(bankTx._id.toString());
+        const bankAmountAbs = Math.abs(bankTx.amount || 0);
+        if (bankAmountAbs === 0) return false;
+        
+        const amountDiff = Math.abs(fuerzaAmount - bankAmountAbs);
+        return amountDiff <= amountTolerance;
       });
 
       if (candidateBankTxs.length === 0) continue;
@@ -143,12 +190,18 @@ class OptimizedTransactionService {
 
       if (dateFilteredCandidates.length === 0) continue;
 
-      // Tomar el primer candidato (mejor match por monto)
-      const bestMatch = dateFilteredCandidates[0];
-
+      // Sort candidates by amount difference to get best match
+      const sortedCandidates = dateFilteredCandidates.sort((a, b) => {
+        const diffA = Math.abs(fuerzaAmount - Math.abs(a.amount || 0));
+        const diffB = Math.abs(fuerzaAmount - Math.abs(b.amount || 0));
+        return diffA - diffB;
+      });
+      
+      const bestMatch = sortedCandidates[0];
       const match = this.calculateAmountDateMatch(fuerzaTx, bestMatch);
       
-      if (match.confidence >= 0.5) {
+      // Lower threshold for amount-based matches
+      if (match.confidence >= 0.4) {
         matches.push({
           fuerzaTransactionId: fuerzaTx._id,
           bankTransactionId: bestMatch._id,
@@ -171,8 +224,9 @@ class OptimizedTransactionService {
     const matches = [];
 
     // Solo procesar transacciones que no tienen referencia válida y tienen monto
+    // Updated minimum reference length to 4 digits
     const fuerzaWithoutRef = fuerzaTransactions.filter(tx => 
-      (!tx.reference || tx.reference.length < 3) && tx.amount > 0
+      (!tx.reference || tx.reference.length < 4) && tx.amount > 0
     );
 
     if (fuerzaWithoutRef.length === 0) return matches;
@@ -212,6 +266,39 @@ class OptimizedTransactionService {
   }
 
   /**
+   * Helper: Check if two references match using multiple strategies
+   */
+  referencesMatch(fmRef, bankRef) {
+    if (!fmRef || !bankRef || fmRef.length < 4) return false;
+    
+    // 1. Simple substring match
+    if (bankRef.includes(fmRef)) return true;
+    
+    // 2. Reverse: bank ref in FM ref
+    if (bankRef.length >= 4 && fmRef.includes(bankRef)) return true;
+    
+    // 3. Ends with match
+    if (bankRef.endsWith(fmRef) && bankRef.length >= fmRef.length + 2) return true;
+    
+    // 4. Last digits match (try 4-7 digits)
+    for (let len = Math.min(fmRef.length, bankRef.length, 7); len >= 4; len--) {
+      if (fmRef.slice(-len) === bankRef.slice(-len)) return true;
+    }
+    
+    // 5. Partial: last 4-6 digits of FM in bank
+    for (let len = Math.min(fmRef.length, 6); len >= 4; len--) {
+      if (bankRef.includes(fmRef.slice(-len))) return true;
+    }
+    
+    // 6. Reverse partial: last 4-6 digits of bank in FM
+    for (let len = Math.min(bankRef.length, 6); len >= 4; len--) {
+      if (fmRef.includes(bankRef.slice(-len))) return true;
+    }
+    
+    return false;
+  }
+
+  /**
    * Calcular match basado en referencia
    */
   calculateReferenceMatch(fuerzaTx, bankTx) {
@@ -223,35 +310,122 @@ class OptimizedTransactionService {
       embeddingSimilarity: 0
     };
 
-    // Referencia exacta = máxima confianza
-    if (fuerzaTx.reference === bankTx.reference) {
-      confidence = 0.95;
-    } else if (bankTx.reference.includes(fuerzaTx.reference)) {
-      // Referencia FuerzaMovil es subcadena de referencia bancaria
-      confidence = 0.85;
-    }
-
-    // Bonus por monto similar
-    const amountDiff = Math.abs(fuerzaTx.amount - bankTx.amount);
-    const amountTolerance = Math.max(fuerzaTx.amount * 0.1, 1);
+    // Clean and get references
+    const fmMainRef = (fuerzaTx.reference && fuerzaTx.reference.replace(/[^\d]/g, '')) || '';
+    const fmPaymentRef = (fuerzaTx.paymentReference && fuerzaTx.paymentReference.toString().replace(/[^\d]/g, '')) || '';
+    const bankRef = (bankTx.reference && bankTx.reference.replace(/[^\d]/g, '')) || '';
     
-    if (amountDiff <= amountTolerance) {
-      confidence += 0.1;
-      criteria.amountMatch = true;
+    let usedRef = fmMainRef;
+    let refMatchType = 'main_ref';
+
+    // Try payment reference first (often more accurate for bank matches)
+    let matchFound = false;
+    if (fmPaymentRef.length >= 4 && this.referencesMatch(fmPaymentRef, bankRef)) {
+      usedRef = fmPaymentRef;
+      refMatchType = 'payment_ref';
+      matchFound = true;
+    } else if (fmMainRef.length >= 4 && this.referencesMatch(fmMainRef, bankRef)) {
+      usedRef = fmMainRef;
+      refMatchType = 'main_ref';
+      matchFound = true;
+    }
+    
+    if (!matchFound) {
+      // No match found at all
+      return {
+        confidence: 0,
+        matchType: 'reference',
+        criteria: { referenceMatch: false, amountMatch: false, dateMatch: false, embeddingSimilarity: 0 },
+        amountDifference: 0,
+        dateDifference: 0
+      };
     }
 
-    // Bonus por fecha cercana
-    const dateDiff = Math.abs(fuerzaTx.date - bankTx.date) / (1000 * 60 * 60 * 24);
-    if (dateDiff <= 3) {
-      confidence += 0.05;
-      criteria.dateMatch = true;
+    // Calculate confidence based on match quality
+    if (usedRef === bankRef) {
+      confidence = 0.95;
+    } else if (bankRef.endsWith(usedRef) && bankRef.length >= usedRef.length + 2) {
+      confidence = 0.90;
+    } else if (bankRef.includes(usedRef)) {
+      confidence = 0.85;
+    } else if (usedRef.includes(bankRef) && bankRef.length >= 4) {
+      confidence = 0.80;
+    } else {
+      // Partial matches
+      // Partial matches on last digits
+      let bestMatch = 0;
+      for (let len = Math.min(usedRef.length, bankRef.length, 7); len >= 4; len--) {
+        const refLast = usedRef.slice(-len);
+        const bankLast = bankRef.slice(-len);
+        if (refLast === bankLast) {
+          // Exact last N digits match - confidence based on length
+          bestMatch = Math.max(bestMatch, 0.60 + (len - 4) * 0.05); // 0.60-0.75 for 4-7 digits
+        }
+      }
+      
+      // Try if last digits of reference are in bank ref
+      if (bestMatch === 0 && usedRef.length >= 4) {
+        for (let len = Math.min(usedRef.length, 6); len >= 4; len--) {
+          const refLast = usedRef.slice(-len);
+          if (bankRef.includes(refLast)) {
+            bestMatch = Math.max(bestMatch, 0.50 + (len - 4) * 0.05); // 0.50-0.60 for 4-6 digits
+            break;
+          }
+        }
+      }
+      
+      // Try if last digits of bank are in reference
+      if (bestMatch === 0 && bankRef.length >= 4) {
+        for (let len = Math.min(bankRef.length, 6); len >= 4; len--) {
+          const bankLast = bankRef.slice(-len);
+          if (usedRef.includes(bankLast)) {
+            bestMatch = Math.max(bestMatch, 0.50 + (len - 4) * 0.05);
+            break;
+          }
+        }
+      }
+      
+      confidence = bestMatch;
+    }
+
+    // Use paidAmount if available for FuerzaMovil (it's the actual payment amount)
+    const fuerzaAmount = fuerzaTx.paidAmount || fuerzaTx.amount || 0;
+    const bankAmountAbs = Math.abs(bankTx.amount || 0);
+    
+    // Bonus por monto similar - more lenient tolerance
+    let amountDiff = 0;
+    if (fuerzaAmount > 0 && bankAmountAbs > 0) {
+      amountDiff = Math.abs(fuerzaAmount - bankAmountAbs);
+      const amountTolerance = Math.max(fuerzaAmount * 0.10, 5); // 10% tolerance, min $5
+      
+      if (amountDiff <= amountTolerance) {
+        confidence += 0.1;
+        criteria.amountMatch = true;
+      } else if (amountDiff <= amountTolerance * 2) {
+        // Still give small bonus for amounts that are close
+        confidence += 0.05;
+      }
+    }
+
+    // Bonus por fecha cercana (use paymentDate if available)
+    const fuerzaDate = fuerzaTx.paymentDate || fuerzaTx.date;
+    let dateDiff = 0;
+    if (fuerzaDate && bankTx.date) {
+      dateDiff = Math.abs(new Date(fuerzaDate) - new Date(bankTx.date)) / (1000 * 60 * 60 * 24);
+      if (dateDiff <= 3) {
+        confidence += 0.05;
+        criteria.dateMatch = true;
+      }
     }
 
     return {
       confidence: Math.min(confidence, 1),
       matchType: 'reference',
-      criteria,
-      amountDifference: amountDiff / (fuerzaTx.amount || 1),
+      criteria: {
+        ...criteria,
+        referenceMatch: refMatchType // Track which reference was used
+      },
+      amountDifference: amountDiff / (fuerzaAmount || 1),
       dateDifference: dateDiff
     };
   }

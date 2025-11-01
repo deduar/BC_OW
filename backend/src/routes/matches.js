@@ -4,13 +4,16 @@ const Feedback = require('../models/Feedback');
 const Transaction = require('../models/Transaction');
 const { authenticateToken } = require('../middleware/auth');
 const transactionService = require('../services/transactionService');
+const optimizedTransactionService = require('../services/optimizedTransactionService');
 
 const router = express.Router();
 
 // Run matching for user's data
 router.post('/run', authenticateToken, async (req, res) => {
   try {
+    console.log('🔄 ===== MATCHING ENDPOINT CALLED =====');
     console.log('🔄 Starting matching process for user:', req.user._id);
+    console.log('🔄 Request received at:', new Date().toISOString());
 
     const userId = req.user._id;
 
@@ -27,37 +30,44 @@ router.post('/run', authenticateToken, async (req, res) => {
     }).lean();
 
     console.log(`📈 Found ${fuerzaTransactions.length} Fuerza Movil transactions and ${bankTransactions.length} bank transactions`);
+    
+    // Debug: Show sample references
+    if (fuerzaTransactions.length > 0) {
+      console.log('📋 Sample FuerzaMovil references:', fuerzaTransactions.slice(0, 3).map(t => t.reference));
+    }
+    if (bankTransactions.length > 0) {
+      console.log('🏦 Sample Bank references:', bankTransactions.slice(0, 3).map(t => t.reference));
+    }
 
     if (fuerzaTransactions.length === 0 || bankTransactions.length === 0) {
       console.warn('⚠️ No transactions available for matching');
       return res.status(400).json({
-        error: 'Need both Fuerza Movil and bank transactions to run matching'
+        error: 'Need both Fuerza Movil and bank transactions to run matching',
+        fuerzaCount: fuerzaTransactions.length,
+        bankCount: bankTransactions.length
       });
     }
 
-    // Delete existing matches
-    console.log('🗑️ Deleting existing matches...');
-    const deletedMatches = await Match.deleteMany({ userId });
-    console.log(`🗑️ Deleted ${deletedMatches.deletedCount} existing matches`);
-
-    // Run matching
-    console.log('🚀 Running matching algorithm...');
-    const matches = await transactionService.findMatches(
-      userId,
-      fuerzaTransactions,
-      bankTransactions
-    );
-
-    console.log(`✅ Matching completed! Found ${matches.length} matches`);
+    // Run matching - Use optimized (simplified) matching algorithm
+    // Note: runOptimizedMatching already deletes existing matches and saves new ones
+    console.log('🚀 Running optimized matching algorithm (simplified, no ML)...');
+    const result = await optimizedTransactionService.runOptimizedMatching(userId);
+    
+    const matchesCount = result.matchesFound || 0;
+    console.log(`✅ Matching completed! Found ${matchesCount} matches`);
+    console.log('🔄 ===== MATCHING ENDPOINT COMPLETED =====');
 
     res.json({
       message: 'Matching completed',
-      matchesFound: matches.length,
-      matches: matches.slice(0, 50) // Return first 50 matches
+      matchesFound: result.matchesFound || 0,
+      fuerzaTransactionsCount: result.fuerzaTransactions || fuerzaTransactions.length,
+      bankTransactionsCount: result.bankTransactions || bankTransactions.length
     });
   } catch (error) {
+    console.error('❌ ===== MATCHING ENDPOINT ERROR =====');
     console.error('❌ Run matching error:', error);
     console.error('❌ Error stack:', error.stack);
+    console.error('❌ ===== END ERROR =====');
     res.status(500).json({
       error: 'Matching failed',
       details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'

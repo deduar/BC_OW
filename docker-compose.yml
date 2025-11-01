@@ -20,6 +20,8 @@ services:
       - MINIO_ACCESS_KEY=admin
       - MINIO_SECRET_KEY=password
       - JWT_SECRET=your-super-secret-jwt-key-change-in-production
+      # ML_SERVICE_URL is optional - if not set, embeddings will be skipped
+      # - ML_SERVICE_URL=http://ml:5000
     depends_on:
       - mongo
       - minio

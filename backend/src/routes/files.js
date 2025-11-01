@@ -42,7 +42,34 @@ router.post('/upload', authenticateToken, upload.single('file'), async (req, res
     const { s3Key } = await fileService.uploadFile(userId, buffer, originalname, mimetype);
 
     // Detect file type
-    const fileType = fileService.determineTransactionType(originalname, buffer.toString());
+    let fileType = fileService.determineTransactionType(originalname, buffer.toString());
+
+    // PATCH: If PDF and fileType is 'unknown', check if it looks like a bank file
+    if (fileType === 'unknown' && originalname.toLowerCase().endsWith('.pdf')) {
+      // Check if filename suggests it's a bank statement
+      const filenameLower = originalname.toLowerCase();
+      if (filenameLower.includes('banco') || filenameLower.includes('banesco') || 
+          filenameLower.includes('mercantil') || filenameLower.includes('provincial') ||
+          filenameLower.includes('movimiento') || filenameLower.includes('estado') || 
+          filenameLower.includes('cuenta')) {
+        fileType = 'bank';
+      } else {
+        fileType = 'pdf';
+      }
+    }
+    // PATCH: If CSV/XLSX/XLS/TXT, set type to extension
+    if (fileType === 'unknown' && originalname.toLowerCase().endsWith('.csv')) {
+      fileType = 'csv';
+    }
+    if (fileType === 'unknown' && originalname.toLowerCase().endsWith('.xlsx')) {
+      fileType = 'xlsx';
+    }
+    if (fileType === 'unknown' && originalname.toLowerCase().endsWith('.xls')) {
+      fileType = 'xlsx'; // treat xls as xlsx
+    }
+    if (fileType === 'unknown' && originalname.toLowerCase().endsWith('.txt')) {
+      fileType = 'txt';
+    }
 
     // Create file record
     const file = new File({
@@ -169,6 +196,16 @@ async function processFileAsync(fileId, buffer, fileType, userId) {
       console.log(`📊 File is CSV format, parsing...`);
       parsedData = await fileService.parseCsvFile(buffer);
       console.log(`📊 Parsed ${parsedData.length} CSV rows`);
+    } else if (file.filename.match(/\.pdf$/i)) {
+      console.log(`📊 File is PDF format, attempting to parse...`);
+      // Note: PDF parsing is currently not implemented - would need pdf-parse library
+      // For now, return empty array and mark as unsupported
+      parsedData = await fileService.parsePdfFile(buffer);
+      if (parsedData.length === 0) {
+        console.log(`⚠️ PDF parsing not implemented yet - PDF files are not supported`);
+      } else {
+        console.log(`📊 Parsed ${parsedData.length} PDF rows`);
+      }
     } else {
       console.log(`❌ Unsupported file format`);
       parsedData = [];
@@ -188,7 +225,9 @@ async function processFileAsync(fileId, buffer, fileType, userId) {
     if (fileType === 'fuerza_movil') {
       console.log(`⚙️ Processing Fuerza Movil data with ${parsedData.length} rows`);
       transactions = await transactionService.processFuerzaMovilData(parsedData, userId, fileId);
-    } else if (fileType === 'bank') {
+    } else if (fileType === 'bank' || fileType === 'pdf') {
+      // Handle both 'bank' and 'pdf' types as bank transactions
+      // (PDF files detected as bank statements should be processed as bank)
       console.log(`⚙️ Processing Bank data with ${parsedData.length} rows`);
       transactions = await transactionService.processBankData(parsedData, userId, fileId);
     } else {

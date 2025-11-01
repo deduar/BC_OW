@@ -18,29 +18,32 @@ class TransactionService {
       // Debug logging
       console.log(`Processing row ${i}:`, { row0: row[0], rowLength: row.length });
 
-      const reference = (row[0] && row[0].toString().trim()) || `FM-${Date.now()}-${i}`;
+      const rawReference = (row[0] && row[0].toString().trim()) || `FM-${Date.now()}-${i}`;
+      const reference = rawReference.replace(/[^\d]/g, '');
       console.log(`Generated reference:`, reference);
 
       const transaction = {
         fileId,
         userId,
         type: 'fuerza_movil',
-        reference: reference, // Nro. de recibo or generated reference
-        amount: this.parseAmount(row[6]), // Total Nota
-        date: this.parseDate(row[5]), // Fecha de Vencimiento
+        reference: reference, // Column 0: Reference/Recibo number
+        amount: this.parseAmount(row[5]), // Column 5: Total Nota (invoice amount)
+        date: this.parseDate(row[4]), // Column 4: Fecha de Vencimiento (due date)
         description: `Pago ${row[1]} - ${row[2]}`, // Cod Cliente - Cliente
-        clientCode: row[1],
-        clientName: row[2],
-        invoiceNumber: row[3],
-        dueDate: this.parseDate(row[5]),
-        totalAmount: this.parseAmount(row[6]),
-        bank: row[7],
-        paymentDate: this.parseDate(row[8]),
-        paymentReference: row[9],
-        paidAmount: this.parseAmount(row[10]),
-        paymentMethod: row[11],
-        receiptNotes: row[12],
-        receiptStatus: row[13]
+        clientCode: row[1], // Column 1: Cod Cliente
+        clientName: row[2], // Column 2: Cliente
+        invoiceNumber: row[3], // Column 3: Invoice number
+        dueDate: this.parseDate(row[4]), // Column 4: Fecha de Vencimiento
+        totalAmount: this.parseAmount(row[5]), // Column 5: Total Nota
+        bank: row[8], // Column 8: Banco name
+        paymentDate: this.parseDate(row[4]), // Use due date if no payment date available, or extract from row if available
+        // Column 11: Payment reference (e.g., "0576" from "Transferencia 0576")
+        paymentReference: row[11] ? row[11].toString().trim().replace(/[^\d]/g, '') : '', 
+        // Column 12: Paid amount (the actual amount paid to bank)
+        paidAmount: this.parseAmount(row[12]),
+        paymentMethod: row[10], // Column 10: Payment method (e.g., "Transferencia")
+        receiptNotes: row[13],
+        receiptStatus: row[14]
       };
 
       transactions.push(transaction);
@@ -60,7 +63,8 @@ class TransactionService {
       // Debug logging
       console.log(`Processing bank row ${i}:`, { row1: row[1], rowLength: row.length });
 
-      const reference = (row[1] && row[1].toString().trim()) || `BANK-${Date.now()}-${i}`;
+      const rawReference = (row[1] && row[1].toString().trim()) || `BANK-${Date.now()}-${i}`;
+      const reference = rawReference.replace(/[^\d]/g, '');
       console.log(`Generated bank reference:`, reference);
 
       const transaction = {
@@ -87,36 +91,55 @@ class TransactionService {
     console.log(`Saving ${transactions.length} transactions...`);
 
     try {
-      // Generate embeddings for descriptions
+      // Try to generate embeddings for descriptions (optional, non-blocking)
       const descriptions = transactions.map(t => t.description);
-      console.log('Generating embeddings...');
-      const embeddings = await this.generateEmbeddings(descriptions);
-      console.log(`Generated ${embeddings.length} embeddings`);
+      let embeddings = [];
+      
+      try {
+        console.log('Generating embeddings...');
+        embeddings = await this.generateEmbeddings(descriptions);
+        console.log(`Generated ${embeddings.length} embeddings`);
+      } catch (embeddingError) {
+        console.warn('⚠️ Embedding generation failed (continuing without embeddings):', embeddingError.message);
+        // Continue without embeddings - matching can still work with reference/amount/date matching
+        embeddings = descriptions.map(() => []); // Empty arrays for all transactions
+      }
 
-      // Add embeddings to transactions
+      // Add embeddings to transactions (empty arrays if generation failed)
       transactions.forEach((transaction, index) => {
         transaction.embedding = embeddings[index] || [];
       });
 
       console.log('Inserting transactions into database...');
       const savedTransactions = await Transaction.insertMany(transactions);
-      console.log(`Successfully saved ${savedTransactions.length} transactions`);
+      console.log(`✅ Successfully saved ${savedTransactions.length} transactions`);
       return savedTransactions;
     } catch (error) {
-      console.error('Error saving transactions:', error);
+      console.error('❌ Error saving transactions:', error);
       throw error;
     }
   }
 
   async generateEmbeddings(texts) {
+    // If ML service URL is not configured, skip embeddings
+    if (!this.mlServiceUrl || this.mlServiceUrl === 'http://ml:5000') {
+      // Check if ML service is actually available by trying to ping it
+      // For now, just skip if URL is default but service might not be running
+      console.log('⚠️ ML service not configured or unavailable, skipping embeddings');
+      return texts.map(() => []); // Return empty arrays
+    }
+
     try {
       const response = await axios.post(`${this.mlServiceUrl}/embeddings`, {
         texts
+      }, {
+        timeout: 5000 // 5 second timeout
       });
       return response.data.embeddings;
     } catch (error) {
-      console.error('Error generating embeddings:', error);
-      return texts.map(() => []); // Return empty arrays on error
+      console.error('Error generating embeddings:', error.message);
+      // Return empty arrays on error - matching can still work without embeddings
+      return texts.map(() => []);
     }
   }
 
@@ -380,7 +403,7 @@ class TransactionService {
   }
 
   // Helper function to check for consecutive digits
-  hasConsecutiveDigits(fuerzaNumbers, bankNumbers, minLength = 5) {
+  hasConsecutiveDigits(fuerzaNumbers, bankNumbers, minLength = 4) {
     if (fuerzaNumbers.length < minLength || bankNumbers.length < minLength) {
       return false;
     }
@@ -406,8 +429,8 @@ class TransactionService {
     console.log(`🔢 Comparing numbers: Fuerza "${fuerzaNumbers}" vs Bank "${bankNumbers}"`);
 
     // STRICT EMBEDDED REFERENCE VALIDATION
-    // CRITICAL REQUIREMENT: At least 5 consecutive digits must match
-    if (fuerzaNumbers.length >= 5 && bankNumbers.length >= 8) {
+    // CRITICAL REQUIREMENT: At least 4 consecutive digits must match (was 5)
+    if (fuerzaNumbers.length >= 4 && bankNumbers.length >= 8) {
       // Check if bank reference ends with Fuerza reference (most reliable)
       if (bankNumbers.endsWith(fuerzaNumbers)) {
         console.log(`✅ STRICT EMBEDDED MATCH (ENDS WITH): ${fuerzaNumbers} at end of ${bankNumbers}`);
@@ -415,7 +438,7 @@ class TransactionService {
       }
 
       // Check if bank reference contains Fuerza reference with STRICT validation
-      if (bankNumbers.includes(fuerzaNumbers) && this.hasConsecutiveDigits(fuerzaNumbers, bankNumbers, 5)) {
+      if (bankNumbers.includes(fuerzaNumbers) && this.hasConsecutiveDigits(fuerzaNumbers, bankNumbers, 4)) {
         console.log(`✅ STRICT EMBEDDED MATCH (CONTAINS): ${fuerzaNumbers} found in ${bankNumbers}`);
 
         // MUCH HIGHER confidence for embedded matches
@@ -423,14 +446,14 @@ class TransactionService {
 
         if (fuerzaNumbers.length >= 7) confidence = 0.9;
         else if (fuerzaNumbers.length >= 6) confidence = 0.88;
-        else if (fuerzaNumbers.length >= 5) confidence = 0.85;
+        else if (fuerzaNumbers.length >= 4) confidence = 0.85;
 
         return { matched: true, confidence, type: 'embedded_numeric_match' };
       }
 
       // Check for Fuerza reference within bank reference with position-based confidence
       const fuerzaInBank = bankNumbers.indexOf(fuerzaNumbers);
-      if (fuerzaInBank !== -1 && this.hasConsecutiveDigits(fuerzaNumbers, bankNumbers, 5)) {
+      if (fuerzaInBank !== -1 && this.hasConsecutiveDigits(fuerzaNumbers, bankNumbers, 4)) {
         console.log(`✅ STRICT POSITION MATCH: ${fuerzaNumbers} at position ${fuerzaInBank} in ${bankNumbers}`);
         // Higher confidence if Fuerza reference is at the end (more likely to be payment ref)
         const positionRatio = fuerzaInBank / (bankNumbers.length - fuerzaNumbers.length);

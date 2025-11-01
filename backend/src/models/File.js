@@ -16,7 +16,7 @@ const fileSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['fuerza_movil', 'bank'],
+    enum: ['fuerza_movil', 'bank', 'csv', 'xlsx', 'txt', 'pdf'],
     required: true
   },
   mimeType: {
