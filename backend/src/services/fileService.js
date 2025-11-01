@@ -192,19 +192,28 @@ class FileService {
         }
         
         // Look for amount in this line or we'll search in subsequent lines
+        // IMPORTANT: Check EU format FIRST to avoid false matches from simple pattern
+        // (e.g., "5.523,89" should not match "5.52" from simple pattern)
         let amount = '';
-        let amountMatchUS = line.match(amountPatternUS);
         let amountMatchEU = line.match(amountPatternEU);
+        let amountMatchUS = line.match(amountPatternUS);
         let amountMatchSimple = line.match(amountPatternSimple);
         
-        if (amountMatchUS) {
-          // US format: 37,831.39 -> 37831.39
-          amount = amountMatchUS[1].replace(/,/g, '');
-        } else if (amountMatchEU) {
-          // European format: 37.831,39 -> 37831.39
+        if (amountMatchEU) {
+          // European format: 5.523,89 -> 5523.89
           amount = amountMatchEU[1].replace(/\./g, '').replace(',', '.');
+        } else if (amountMatchUS) {
+          // US format: 5,523.89 -> 5523.89
+          amount = amountMatchUS[1].replace(/,/g, '');
         } else if (amountMatchSimple) {
-          amount = amountMatchSimple[1];
+          // Simple format: only use if it's not part of a larger EU format
+          // Check if there's a potential EU format nearby (e.g., "5.523,89" contains "5.52")
+          const simpleValue = amountMatchSimple[1];
+          // Verify this isn't a substring of an EU format
+          const potentialEU = line.match(/\d+\.\d+,\d+/);
+          if (!potentialEU || !potentialEU[0].includes(simpleValue)) {
+            amount = simpleValue;
+          }
         }
         
         // Description starts after reference
@@ -223,17 +232,25 @@ class FileService {
         currentTransactionLines.push(line);
         
         // Look for amount in continuation lines (amount might be on 2nd or 3rd line)
+        // IMPORTANT: Check EU format FIRST to avoid false matches
         if (!currentTransaction[3] || currentTransaction[3] === '0') {
-          let amountMatchUS = line.match(amountPatternUS);
           let amountMatchEU = line.match(amountPatternEU);
+          let amountMatchUS = line.match(amountPatternUS);
           let amountMatchSimple = line.match(amountPatternSimple);
           
-          if (amountMatchUS) {
-            currentTransaction[3] = amountMatchUS[1].replace(/,/g, '');
-          } else if (amountMatchEU) {
+          if (amountMatchEU) {
+            // European format: 5.523,89 -> 5523.89
             currentTransaction[3] = amountMatchEU[1].replace(/\./g, '').replace(',', '.');
+          } else if (amountMatchUS) {
+            // US format: 5,523.89 -> 5523.89
+            currentTransaction[3] = amountMatchUS[1].replace(/,/g, '');
           } else if (amountMatchSimple) {
-            currentTransaction[3] = amountMatchSimple[1];
+            // Simple format: only use if it's not part of a larger EU format
+            const simpleValue = amountMatchSimple[1];
+            const potentialEU = line.match(/\d+\.\d+,\d+/);
+            if (!potentialEU || !potentialEU[0].includes(simpleValue)) {
+              currentTransaction[3] = simpleValue;
+            }
           }
         }
         

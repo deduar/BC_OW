@@ -147,9 +147,20 @@ function Matches() {
                 <TableRow key={match._id}>
                   <TableCell>
                     <Box>
-                      <Typography variant="body2" fontWeight="bold">
-                        {match.fuerzaTransactionId?.reference}
-                      </Typography>
+                      <Box sx={{ mb: 1, p: 1, bgcolor: 'grey.100', borderRadius: 1 }}>
+                        <Typography variant="caption" color="textSecondary" display="block">
+                          Reference:
+                        </Typography>
+                        <Typography variant="body2" fontWeight="bold">
+                          {match.fuerzaTransactionId?.reference || 'N/A'}
+                        </Typography>
+                        <Typography variant="caption" color="textSecondary" display="block" sx={{ mt: 0.5 }}>
+                          Payment Reference:
+                        </Typography>
+                        <Typography variant="body2" fontWeight="bold" sx={{ color: 'primary.main' }}>
+                          {match.fuerzaTransactionId?.paymentReference || 'N/A'}
+                        </Typography>
+                      </Box>
                       <Typography variant="body2" color="textSecondary">
                         {match.fuerzaTransactionId?.description}
                       </Typography>

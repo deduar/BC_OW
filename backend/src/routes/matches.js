@@ -88,7 +88,7 @@ router.get('/', authenticateToken, async (req, res) => {
     const matches = await Match.find(query)
       .populate({
         path: 'fuerzaTransactionId',
-        select: 'reference amount date description clientName'
+        select: 'reference paymentReference amount date description clientName invoiceNumber'
       })
       .populate({
         path: 'bankTransactionId',
@@ -124,10 +124,12 @@ router.get('/:id', authenticateToken, async (req, res) => {
     const match = await Match.findOne({ _id: matchId, userId })
       .populate({
         path: 'fuerzaTransactionId',
+        select: 'reference paymentReference amount date description clientName invoiceNumber',
         populate: { path: 'fileId', select: 'filename' }
       })
       .populate({
         path: 'bankTransactionId',
+        select: 'reference amount date description bank',
         populate: { path: 'fileId', select: 'filename' }
       });
 

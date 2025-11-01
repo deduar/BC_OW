@@ -113,42 +113,61 @@ class OptimizedTransactionService {
         // Combine both for comprehensive search
         const bankAllDigits = bankRef + bankDescDigits;
         
-        // Try matching with main reference
-        if (fmMainRef.length >= 4) {
-          // Check in reference field
-          const matchResult = bankRef ? this.referencesMatch(fmMainRef, bankRef) : { matched: false, maxLength: 0 };
+        // PRIORITY 1: Check paymentReference FIRST (PRIMARY - this is the actual bank payment reference)
+        // paymentReference (FM) should match reference (Bank) - this is the main comparison
+        // CRITICAL: paymentRef at END is most reliable (last digits of bank reference)
+        // paymentRef at START is less reliable - need stricter validation
+        if (fmPaymentRef.length >= 4 && bankRef && bankRef.length >= 4) {
+          const matchResult = this.referencesMatch(fmPaymentRef, bankRef);
+          if (matchResult.matched) {
+            // Validate position
+            const index = bankRef.indexOf(fmPaymentRef);
+            const atStart = index === 0;
+            const atEnd = index + fmPaymentRef.length === bankRef.length;
+            const ratio = fmPaymentRef.length / bankRef.length;
+            
+            // END position: Always valid (paymentRef are the last digits of bank reference)
+            // This is the most common case: paymentRef "0576" at end of bankRef "00020576"
+            if (atEnd) {
+              return true;
+            }
+            // START position: Only valid if paymentRef is significant portion (> 50% of bankRef OR >= 5 digits)
+            // This prevents false positives like "8164" (4 digits, 50%) matching "81648628" at start
+            // But allows cases like "12345" (5 digits) matching "12345678" at start
+            else if (atStart && (ratio > 0.5 || fmPaymentRef.length >= 5)) {
+              return true;
+            }
+            // If paymentRef is in middle or at start but too short, reject (likely coincidence)
+          }
+        }
+        
+        // PRIORITY 2: Check main reference (fallback if paymentRef doesn't match)
+        // Check in reference field
+        if (fmMainRef.length >= 4 && bankRef && bankRef.length >= 4) {
+          const matchResult = this.referencesMatch(fmMainRef, bankRef);
           if (matchResult.matched) {
             return true;
           }
-          // Check in description digits
-          const matchDesc = bankDescDigits ? this.referencesMatch(fmMainRef, bankDescDigits) : { matched: false, maxLength: 0 };
-          if (matchDesc.matched) {
-            return true;
-          }
-          // REMOVED: Check in combined digits (causes false positives)
-          // The reference must be completely in bankRef OR bankDesc, not split across both
-          // const matchCombined = bankAllDigits ? this.referencesMatch(fmMainRef, bankAllDigits) : { matched: false, maxLength: 0 };
-          // if (matchCombined.matched) {
-          //   return true;
-          // }
         }
-        
-        // Try matching with payment reference ONLY if main reference doesn't exist or is invalid
-        // CRITICAL: If mainRef exists and is valid (4+ digits), we MUST NOT use paymentRef
-        // This prevents false positives where mainRef doesn't match but paymentRef accidentally matches
-        // Example: mainRef "900823" doesn't match "10355942", but paymentRef "3559" accidentally matches
-        // CRITICAL: paymentReference should ONLY be checked in bank reference field, NOT in description
-        if (fmPaymentRef.length >= 4 && bankRef && bankRef.length >= 4) {
-          // ONLY use paymentRef if mainRef doesn't exist or is invalid
-          const mainRefIsInvalid = !fmMainRef || fmMainRef.length < 4;
-          if (mainRefIsInvalid) {
-            // ONLY check in bank reference field, not in description
-            const matchResult = this.referencesMatch(fmPaymentRef, bankRef);
-            if (matchResult.matched) {
+        // Check in description with STRICT validation (to avoid false positives from amounts/codes)
+        if (fmMainRef.length >= 4 && bankDescDigits) {
+          const matchResult = this.referencesMatch(fmMainRef, bankDescDigits);
+          if (matchResult.matched) {
+            // Validate: reject if part of a very long continuous digit sequence (>15 digits)
+            const index = bankDescDigits.indexOf(fmMainRef);
+            const before = bankDescDigits.substring(Math.max(0, index - 10), index);
+            const after = bankDescDigits.substring(index + fmMainRef.length, index + fmMainRef.length + 10);
+            
+            const beforeIsLongDigits = /\d{10,}/.test(before) || before.length >= 10;
+            const afterIsLongDigits = /\d{10,}/.test(after) || after.length >= 10;
+            const totalSequenceLength = before.length + fmMainRef.length + after.length;
+            
+            // Accept only if NOT part of a very long continuous sequence
+            if (totalSequenceLength <= 15 && !(beforeIsLongDigits && afterIsLongDigits)) {
               return true;
             }
+            // If part of very long sequence, reject (likely structured code)
           }
-          // If mainRef exists and is valid, do NOT check paymentRef (prevents false positives)
         }
         
         // Try matching with invoice number ONLY if main reference doesn't exist or is invalid
@@ -514,15 +533,51 @@ class OptimizedTransactionService {
     let refMatchType = 'main_ref';
     let matchLocation = 'reference_field';
 
-    // CRITICAL: Main reference must be checked FIRST
-    // Payment reference should only be used when main reference doesn't exist or is invalid
+    // CRITICAL: paymentReference (FM) vs reference (Bank) should be the PRIMARY comparison
+    // This is the actual bank payment reference that appears in bank transactions
     let matchFound = false;
     
     let maxMatchLength = 0; // Track longest matching sequence for confidence
     
-    // PRIORITY 1: Check main reference first (most important)
+    // PRIORITY 1: Check paymentReference FIRST (most important - this is the actual bank reference)
+    // paymentReference from FM should match reference from Bank
+    // CRITICAL: paymentRef at END is most reliable (last digits of bank reference)
+    // paymentRef at START is less reliable - need stricter validation
+    if (!matchFound && fmPaymentRef.length >= 4 && bankRef && bankRef.length >= 4) {
+      const matchResult = this.referencesMatch(fmPaymentRef, bankRef);
+      if (matchResult.matched) {
+        // Validate position
+        const index = bankRef.indexOf(fmPaymentRef);
+        const atStart = index === 0;
+        const atEnd = index + fmPaymentRef.length === bankRef.length;
+        const ratio = fmPaymentRef.length / bankRef.length;
+        
+        // END position: Always valid (paymentRef are the last digits of bank reference)
+        // This is the most common case: paymentRef "0576" at end of bankRef "00020576"
+        if (atEnd) {
+          usedRef = fmPaymentRef;
+          refMatchType = 'payment_ref';
+          matchLocation = 'reference_field';
+          maxMatchLength = matchResult.maxLength;
+          matchFound = true;
+        }
+        // START position: Only valid if paymentRef is significant portion (> 50% of bankRef OR >= 5 digits)
+        // This prevents false positives like "8164" (4 digits, 50%) matching "81648628" at start
+        // But allows cases like "12345" (5 digits) matching "12345678" at start
+        else if (atStart && (ratio > 0.5 || fmPaymentRef.length >= 5)) {
+          usedRef = fmPaymentRef;
+          refMatchType = 'payment_ref';
+          matchLocation = 'reference_field';
+          maxMatchLength = matchResult.maxLength;
+          matchFound = true;
+        }
+        // If paymentRef is in middle or at start but too short, reject (likely coincidence)
+      }
+    }
+    
+    // PRIORITY 2: Check main reference (secondary - fallback if paymentRef doesn't match)
     // Check main reference in bank reference field
-    if (fmMainRef.length >= 4 && bankRef) {
+    if (!matchFound && fmMainRef.length >= 4 && bankRef && bankRef.length >= 4) {
       const matchResult = this.referencesMatch(fmMainRef, bankRef);
       if (matchResult.matched) {
         usedRef = fmMainRef;
@@ -532,15 +587,35 @@ class OptimizedTransactionService {
         matchFound = true;
       }
     }
-    // Check main reference in bank description
+    // Check main reference in bank description with STRICT validation
+    // Only allow if NOT part of a very long continuous sequence of digits (>15 digits)
+    // Long sequences are likely structured codes, not natural text with references
     if (!matchFound && fmMainRef.length >= 4 && bankDescDigits) {
       const matchResult = this.referencesMatch(fmMainRef, bankDescDigits);
       if (matchResult.matched) {
-        usedRef = fmMainRef;
-        refMatchType = 'main_ref';
-        matchLocation = 'description_field';
-        maxMatchLength = matchResult.maxLength;
-        matchFound = true;
+        // Validate: reject if the sequence around the match is very long (>15 digits)
+        // This indicates it's a structured code, not a natural text reference
+        const index = bankDescDigits.indexOf(fmMainRef);
+        const before = bankDescDigits.substring(Math.max(0, index - 10), index);
+        const after = bankDescDigits.substring(index + fmMainRef.length, index + fmMainRef.length + 10);
+        
+        // Check if surrounded by many digits (indicating structured code)
+        const beforeIsLongDigits = /\d{10,}/.test(before) || before.length >= 10;
+        const afterIsLongDigits = /\d{10,}/.test(after) || after.length >= 10;
+        const totalSequenceLength = before.length + fmMainRef.length + after.length;
+        
+        // Reject if part of a very long continuous digit sequence (>15 total)
+        // This is likely a structured code, not a natural reference in text
+        if (totalSequenceLength > 15 || (beforeIsLongDigits && afterIsLongDigits)) {
+          // Embedded in very long sequence - reject (likely structured code)
+        } else {
+          // Reasonable context - accept match
+          usedRef = fmMainRef;
+          refMatchType = 'main_ref';
+          matchLocation = 'description_field';
+          maxMatchLength = matchResult.maxLength;
+          matchFound = true;
+        }
       }
     }
     // REMOVED: Check main reference in combined digits
@@ -557,25 +632,8 @@ class OptimizedTransactionService {
     //     matchFound = true;
     //   }
     // }
-    // PRIORITY 2: Check payment reference ONLY if main reference doesn't exist or is invalid
-    // CRITICAL RULE: If mainRef exists and is valid (4+ digits), we MUST NOT use paymentRef
-    // If mainRef is valid but doesn't match, it means these are NOT the same transaction
-    // Using paymentRef in this case causes false positives (e.g., "3559" matching "10355942" accidentally)
-    // PaymentReference should ONLY be checked in bank reference field, NOT in description
-    const mainRefIsInvalid = !fmMainRef || fmMainRef.length < 4;
-    if (!matchFound && mainRefIsInvalid && fmPaymentRef.length >= 4 && bankRef && bankRef.length >= 4) {
-      // ONLY check in bank reference field, not in description
-      // This ensures paymentReference is actually a reference, not a coincidental match in dates/amounts
-      const matchResult = this.referencesMatch(fmPaymentRef, bankRef);
-      if (matchResult.matched) {
-        usedRef = fmPaymentRef;
-        refMatchType = 'payment_ref';
-        matchLocation = 'reference_field';
-        maxMatchLength = matchResult.maxLength;
-        matchFound = true;
-      }
-    }
-    // If mainRef exists and is valid but didn't match, do NOT try paymentRef (prevents false positives)
+    // PRIORITY 1 already checked paymentReference above
+    // This section is now only for removing duplicate logic
     // CRITICAL: Invoice numbers should ONLY be used if main reference doesn't exist or is invalid (< 4 digits)
     // If main reference exists (4+ digits), we MUST use it and cannot fall back to invoice numbers
     // This prevents false positives like "1002388" (main ref) matching "1762007965829164" via invoice number
