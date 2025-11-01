@@ -269,32 +269,13 @@ class OptimizedTransactionService {
    * Helper: Check if two references match using multiple strategies
    */
   referencesMatch(fmRef, bankRef) {
-    if (!fmRef || !bankRef || fmRef.length < 4) return false;
-    
-    // 1. Simple substring match
-    if (bankRef.includes(fmRef)) return true;
-    
-    // 2. Reverse: bank ref in FM ref
-    if (bankRef.length >= 4 && fmRef.includes(bankRef)) return true;
-    
-    // 3. Ends with match
-    if (bankRef.endsWith(fmRef) && bankRef.length >= fmRef.length + 2) return true;
-    
-    // 4. Last digits match (try 4-7 digits)
-    for (let len = Math.min(fmRef.length, bankRef.length, 7); len >= 4; len--) {
-      if (fmRef.slice(-len) === bankRef.slice(-len)) return true;
+    // Strict: must find the FULL FuerzaMovil reference (all digits) as a contiguous substring in the bank reference
+    if (!fmRef || !bankRef) return false;
+    if (fmRef.length < 4) return false;
+    // Only exact-length contiguous substring match
+    if (bankRef.includes(fmRef)) {
+      return true;
     }
-    
-    // 5. Partial: last 4-6 digits of FM in bank
-    for (let len = Math.min(fmRef.length, 6); len >= 4; len--) {
-      if (bankRef.includes(fmRef.slice(-len))) return true;
-    }
-    
-    // 6. Reverse partial: last 4-6 digits of bank in FM
-    for (let len = Math.min(bankRef.length, 6); len >= 4; len--) {
-      if (fmRef.includes(bankRef.slice(-len))) return true;
-    }
-    
     return false;
   }
 
@@ -341,51 +322,14 @@ class OptimizedTransactionService {
       };
     }
 
-    // Calculate confidence based on match quality
+    // Calculate confidence based on strict match quality
     if (usedRef === bankRef) {
-      confidence = 0.95;
-    } else if (bankRef.endsWith(usedRef) && bankRef.length >= usedRef.length + 2) {
-      confidence = 0.90;
+      confidence = 0.95; // Exact match
     } else if (bankRef.includes(usedRef)) {
-      confidence = 0.85;
-    } else if (usedRef.includes(bankRef) && bankRef.length >= 4) {
-      confidence = 0.80;
+      confidence = 0.85; // Full FuerzaMovil reference as substring in bank ref
     } else {
-      // Partial matches
-      // Partial matches on last digits
-      let bestMatch = 0;
-      for (let len = Math.min(usedRef.length, bankRef.length, 7); len >= 4; len--) {
-        const refLast = usedRef.slice(-len);
-        const bankLast = bankRef.slice(-len);
-        if (refLast === bankLast) {
-          // Exact last N digits match - confidence based on length
-          bestMatch = Math.max(bestMatch, 0.60 + (len - 4) * 0.05); // 0.60-0.75 for 4-7 digits
-        }
-      }
-      
-      // Try if last digits of reference are in bank ref
-      if (bestMatch === 0 && usedRef.length >= 4) {
-        for (let len = Math.min(usedRef.length, 6); len >= 4; len--) {
-          const refLast = usedRef.slice(-len);
-          if (bankRef.includes(refLast)) {
-            bestMatch = Math.max(bestMatch, 0.50 + (len - 4) * 0.05); // 0.50-0.60 for 4-6 digits
-            break;
-          }
-        }
-      }
-      
-      // Try if last digits of bank are in reference
-      if (bestMatch === 0 && bankRef.length >= 4) {
-        for (let len = Math.min(bankRef.length, 6); len >= 4; len--) {
-          const bankLast = bankRef.slice(-len);
-          if (usedRef.includes(bankLast)) {
-            bestMatch = Math.max(bestMatch, 0.50 + (len - 4) * 0.05);
-            break;
-          }
-        }
-      }
-      
-      confidence = bestMatch;
+      // Any other case should not happen; covered by referencesMatch and filtered out
+      confidence = 0;
     }
 
     // Use paidAmount if available for FuerzaMovil (it's the actual payment amount)
